@@ -8,6 +8,9 @@ from distutils.version import LooseVersion
 # Numerical libs
 import torch
 import torch.nn as nn
+from apex import amp
+import apex
+from apex.parallel import DistributedDataParallel
 # Our libs
 from config import cfg
 from dataset import TrainDataset
@@ -43,7 +46,13 @@ def train(segmentation_module, iterator, optimizers, history, epoch, cfg):
         acc = acc.mean()
 
         # Backward
-        loss.backward()
+        # loss.backward()
+        # for optimizer in optimizers:
+        #     optimizer.step()
+
+        # https://nvidia.github.io/apex/advanced.html#multiple-models-optimizers-losses
+        with amp.scale_loss(loss, optimizers) as scaled_loss:
+            scaled_loss.backward()
         for optimizer in optimizers:
             optimizer.step()
 
@@ -71,9 +80,9 @@ def train(segmentation_module, iterator, optimizers, history, epoch, cfg):
             history['train']['acc'].append(acc.data.item())
 
 
-def checkpoint(nets, history, cfg, epoch):
+def checkpoint_apex(nets, history, cfg, epoch):
     print('Saving checkpoints...')
-    (net_encoder, net_decoder, crit) = nets
+    net_encoder, net_decoder = nets.encoder, nets.decoder
 
     dict_encoder = net_encoder.state_dict()
     dict_decoder = net_decoder.state_dict()
@@ -180,18 +189,22 @@ def main(cfg, gpus):
     # create loader iterator
     iterator_train = iter(loader_train)
 
-    # load nets into gpu
-    if len(gpus) > 1:
-        segmentation_module = UserScatteredDataParallel(
-            segmentation_module,
-            device_ids=gpus)
-        # For sync bn
-        patch_replication_callback(segmentation_module)
     segmentation_module.cuda()
+
+    if cfg.sync_bn:
+        print("using apex synced BN")
+        segmentation_module = apex.parallel.convert_syncbn_model(segmentation_module)
 
     # Set up optimizers
     nets = (net_encoder, net_decoder, crit)
     optimizers = create_optimizers(nets, cfg)
+
+    segmentation_module, optimizers = amp.initialize(segmentation_module, optimizers, opt_level="O1")
+
+    if cfg.distributed:
+        # FOR DISTRIBUTED:  After amp.initialize, wrap the model with
+        # apex.parallel.DistributedDataParallel.
+        segmentation_module = DistributedDataParallel(segmentation_module)
 
     # Main loop
     history = {'train': {'epoch': [], 'loss': [], 'acc': []}}
@@ -200,7 +213,8 @@ def main(cfg, gpus):
         train(segmentation_module, iterator_train, optimizers, history, epoch+1, cfg)
 
         # checkpointing
-        checkpoint(nets, history, cfg, epoch+1)
+        # checkpoint(nets, history, cfg, epoch+1)
+        checkpoint_apex(segmentation_module, history, cfg, epoch+1)
 
     print('Training Done!')
 
@@ -212,6 +226,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description="PyTorch Semantic Segmentation Training"
     )
+    # https://github.com/NVIDIA/apex/blob/master/examples/simple/distributed/distributed_data_parallel.py
+    # FOR DISTRIBUTED:  Parse for the local_rank argument, which will be supplied
+    # automatically by torch.distributed.launch.
+    parser.add_argument("--local_rank", default=0, type=int)
     parser.add_argument(
         "--cfg",
         default="config/ade20k-resnet50dilated-ppm_deepsup.yaml",
@@ -231,7 +249,23 @@ if __name__ == '__main__':
         nargs=argparse.REMAINDER,
     )
     args = parser.parse_args()
+    # FOR DISTRIBUTED:  If we are running under torch.distributed.launch,
+    # the 'WORLD_SIZE' environment variable will also be set automatically.
+    args.distributed = False
+    if 'WORLD_SIZE' in os.environ:
+        args.distributed = int(os.environ['WORLD_SIZE']) > 1
 
+    if args.distributed:
+        # FOR DISTRIBUTED:  Set the device according to local_rank.
+        torch.cuda.set_device(args.local_rank)
+
+        # FOR DISTRIBUTED:  Initialize the backend.  torch.distributed.launch will provide
+        # environment variables, and requires that you use init_method=`env://`.
+        torch.distributed.init_process_group(backend='nccl',
+                                            init_method='env://')
+    torch.backends.cudnn.benchmark = True
+    
+    cfg.merge_from_file(args)
     cfg.merge_from_file(args.cfg)
     cfg.merge_from_list(args.opts)
     # cfg.freeze()

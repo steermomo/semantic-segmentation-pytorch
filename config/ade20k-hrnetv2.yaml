@@ -40,3 +40,5 @@ TEST:
   result: "./"
 
 DIR: "ckpt/ade20k-hrnetv2-c1"
+
+sync_bn: True
