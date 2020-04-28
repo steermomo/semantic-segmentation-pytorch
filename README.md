@@ -1,6 +1,9 @@
 # 改
 原repo挺好, 我想用apex+分布式训练, 而且apex也已经支持SyncBN了
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node=2 train.py --cfg $CFG 
 
+```
 
 # Semantic Segmentation on MIT ADE20K dataset in PyTorch
 

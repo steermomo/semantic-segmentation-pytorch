@@ -16,7 +16,7 @@ from config import cfg
 from dataset import TrainDataset
 from models import ModelBuilder, SegmentationModule
 from utils import AverageMeter, parse_devices, setup_logger
-from lib.nn import UserScatteredDataParallel, user_scattered_collate, patch_replication_callback
+from lib.nn import user_scattered_collate #, patch_replication_callback, UserScatteredDataParallel
 
 
 # train one epoch
@@ -176,14 +176,17 @@ def main(cfg, gpus):
         cfg.DATASET,
         batch_per_gpu=cfg.TRAIN.batch_size_per_gpu)
 
+    train_sampler = torch.utils.data.distributed.DistributedSampler(dataset_train)
+
     loader_train = torch.utils.data.DataLoader(
         dataset_train,
-        batch_size=len(gpus),  # we have modified data_parallel
-        shuffle=False,  # we do not use this param
+        batch_size=cfg.TRAIN.batch_size_per_gpu,  # 
+        shuffle=(train_sampler is None),  # we do not use this param
         collate_fn=user_scattered_collate,
         num_workers=cfg.TRAIN.workers,
         drop_last=True,
-        pin_memory=True)
+        pin_memory=True,
+        sampler=train_sampler)
     print('1 Epoch = {} iters'.format(cfg.TRAIN.epoch_iters))
 
     # create loader iterator
